@@ -28,14 +28,17 @@ public class RefreshIntercepter implements HandlerInterceptor {
         if (token == null){
             return true;
         }
-        Map<Object, Object> claims = stringRedisTemplate.opsForHash().entries("login:user:" + token);
+        // key 前缀与 TTL 与 UserServiceImpl 的写入逻辑保持一致，
+        // 统一取自 RedisConstants，避免两处硬编码不同步导致登录态读不到。
+        String loginKey = RedisConstants.LOGIN_USER_KEY + token;
+        Map<Object, Object> claims = stringRedisTemplate.opsForHash().entries(loginKey);
         if (claims.isEmpty()){
             return true;
         }
         UserDTO userDTO = BeanUtil.toBean(claims, UserDTO.class);
         UserHolder.saveUser(userDTO);
         // 刷新token的过期时间
-        stringRedisTemplate.expire("login:user:" + token, 30, TimeUnit.MINUTES);
+        stringRedisTemplate.expire(loginKey, RedisConstants.LOGIN_USER_TTL, TimeUnit.MINUTES);
         return true;
     }
 }

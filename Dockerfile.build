@@ -1,0 +1,19 @@
+# 仅负责编译打包的构建阶段镜像。
+# 单独抽出来是为了复用 Maven 依赖层缓存：
+#   docker build -f Dockerfile.build -t dianping-xpro:builder .
+# 正常情况下由 Dockerfile 内部引用，不需要单独构建。
+FROM maven:3.9-eclipse-temurin-25 AS builder
+
+WORKDIR /build
+
+# 先只复制 pom，下一层 go-offline 拉依赖。
+# 源码变动时这一层缓存不失效，构建会快很多。
+COPY pom.xml .
+RUN mvn -B -e -q dependency:go-offline
+
+# 再复制源码进行打包。跳过测试，测试需要 H2 之外的运行环境。
+COPY src ./src
+RUN mvn -B -e -q clean package -DskipTests
+
+# 产物固定成规范名字，方便下一阶段 COPY，不用关心版本号。
+RUN cp target/*.jar /build/app.jar

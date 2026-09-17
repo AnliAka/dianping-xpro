@@ -1,6 +1,5 @@
 package com.dianping.xpro.controller;
 
-
 import com.dianping.xpro.dto.Result;
 import com.dianping.xpro.entity.Voucher;
 import com.dianping.xpro.service.IVoucherService;
@@ -12,9 +11,6 @@ import jakarta.annotation.Resource;
  * <p>
  *  前端控制器
  * </p>
- *
- * @author 虎哥
- * @since 2021-12-22
  */
 @RestController
 @RequestMapping("/voucher")

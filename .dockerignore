@@ -1,0 +1,32 @@
+# 构建上下文排除项：只把构建真正需要的文件送进 daemon。
+# 本机私有配置绝不能进镜像。
+config/
+src/main/resources/application-local.yml
+
+# 构建产物与 IDE 目录
+target/
+!.mvn/wrapper/maven-wrapper.jar
+.git/
+.gitignore
+.idea/
+*.iml
+*.iws
+*.ipr
+.vscode/
+.settings/
+.classpath
+.project
+
+# 本地资料与 agent 工作区
+压测方案/
+new-docs/
+.workbuddy/
+nginx-1.18.0/
+
+# 文档与杂项
+*.md
+!docker/README.md
+Dockerfile
+Dockerfile.build
+.dockerignore
+compose.yaml

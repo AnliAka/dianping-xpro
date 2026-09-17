@@ -2,9 +2,6 @@ package com.dianping.xpro.utils;
 
 import cn.hutool.core.util.StrUtil;
 
-/**
- * @author 虎哥
- */
 public class RegexUtils {
     /**
      * 是否是无效手机格式

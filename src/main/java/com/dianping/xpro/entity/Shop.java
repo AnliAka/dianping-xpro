@@ -11,14 +11,6 @@ import lombok.experimental.Accessors;
 import java.io.Serializable;
 import java.time.LocalDateTime;
 
-/**
- * <p>
- * 
- * </p>
- *
- * @author 虎哥
- * @since 2021-12-22
- */
 @Data
 @EqualsAndHashCode(callSuper = false)
 @Accessors(chain = true)
@@ -102,7 +94,6 @@ public class Shop implements Serializable {
      * 更新时间
      */
     private LocalDateTime updateTime;
-
 
     @TableField(exist = false)
     private Double distance;

@@ -1,0 +1,101 @@
+# 本地开发用的中间件编排：MySQL 8 + Redis 7，可选再起一个应用容器。
+#
+# 常用命令（在项目根目录执行）：
+#   docker compose up -d mysql redis      # 只起中间件，应用在 IDE / java -jar 里跑
+#   docker compose up -d --build          # 连应用镜像一起构建并启动
+#   docker compose logs -f app            # 跟踪应用日志
+#   docker compose down                   # 停止并删除容器（数据卷保留）
+#   docker compose down -v                # 连同数据卷一起删除，慎用
+#
+# 宿主机端口刻意避开常用默认值，防止和本机已装的 MySQL / Redis 冲突。
+
+services:
+  mysql:
+    image: mysql:8.4
+    container_name: dianping-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-1234}
+      MYSQL_DATABASE: ${DB_NAME:-dianping_xpro}
+      TZ: Asia/Shanghai
+    ports:
+      - "${MYSQL_PORT:-3307}:3306"
+    volumes:
+      - mysql-data:/var/lib/mysql
+      # 首次启动（数据卷为空）时自动执行建库脚本。
+      # 已有数据卷时不会重跑，需要重跑请先 docker compose down -v。
+      - ./src/main/resources/db/dianping-xpro.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --default-time-zone=+08:00
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p$$MYSQL_ROOT_PASSWORD --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  redis:
+    image: redis:7-alpine
+    container_name: dianping-redis
+    restart: unless-stopped
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-1}
+    ports:
+      - "${REDIS_PORT:-6380}:6379"
+    volumes:
+      - redis-data:/data
+    # 秒杀链路依赖 Redis Stream + 消费者组，重启后不能丢。
+    # 开启 AOF everysec：最多丢 1 秒数据，同时保留 RDB 快照做冷备。
+    command:
+      - redis-server
+      - --requirepass
+      - ${REDIS_PASSWORD:-1}
+      - --appendonly
+      - "yes"
+      - --appendfsync
+      - everysec
+      - --save
+      - "900 1"
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a $$REDIS_PASSWORD ping | grep -q PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  # 应用容器。默认不随 up 启动，用 profile 控制：
+  #   docker compose --profile app up -d --build
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: dianping-xpro:latest
+    container_name: dianping-app
+    profiles: ["app"]
+    restart: unless-stopped
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      # 容器内用服务名寻址，覆盖 application.yml 里的本机地址。
+      SPRING_DATASOURCE_URL: >-
+        jdbc:mysql://mysql:3306/${DB_NAME:-dianping_xpro}?useSSL=false&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true
+      SPRING_DATASOURCE_USERNAME: root
+      SPRING_DATASOURCE_PASSWORD: ${MYSQL_ROOT_PASSWORD:-1234}
+      SPRING_DATA_REDIS_HOST: redis
+      SPRING_DATA_REDIS_PORT: 6379
+      SPRING_DATA_REDIS_PASSWORD: ${REDIS_PASSWORD:-1}
+    ports:
+      - "${APP_PORT:-8081}:8081"
+    volumes:
+      # 本机私有配置挂进来，覆盖镜像内的默认值。
+      # 文件不随构建进镜像，密码不落盘到镜像层。
+      - ./config:/app/config:ro
+
+volumes:
+  mysql-data:
+  redis-data:

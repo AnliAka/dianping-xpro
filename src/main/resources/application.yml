@@ -7,12 +7,13 @@ spring:
     # IDE 和 java -jar 均从工作目录读取本机私有配置。
     import: optional:file:./config/application-local.yml
   datasource:
-    url: jdbc:mysql://localhost:3306/${DB_NAME:dianping_xpro}?useSSL=false&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true
-    username: root
+    # 本机地址与密码见 config/application-local.yml，此处只留通用默认值。
+    url: jdbc:mysql://${DB_HOST:localhost}:${DB_PORT:3306}/${DB_NAME:dianping_xpro}?useSSL=false&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true
+    username: ${DB_USERNAME:root}
   data:
     redis:
-      host: 192.168.80.133
-      port: 6379
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
       lettuce:
         pool:
           max-active: 10

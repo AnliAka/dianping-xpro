@@ -1,6 +1,5 @@
 package com.dianping.xpro.controller;
 
-
 import com.dianping.xpro.dto.LoginFormDTO;
 import com.dianping.xpro.dto.Result;
 import com.dianping.xpro.entity.UserInfo;
@@ -17,9 +16,6 @@ import jakarta.annotation.Resource;
  * <p>
  * 前端控制器
  * </p>
- *
- * @author 虎哥
- * @since 2021-12-22
  */
 @Slf4j
 @RestController
