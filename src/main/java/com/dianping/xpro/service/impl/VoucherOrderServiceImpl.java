@@ -1,225 +1,134 @@
 package com.dianping.xpro.service.impl;
 
+import com.baomidou.mybatisplus.spring.service.impl.ServiceImpl;
+import com.dianping.xpro.dto.Result;
 import com.dianping.xpro.entity.VoucherOrder;
 import com.dianping.xpro.mapper.VoucherOrderMapper;
+import com.dianping.xpro.mq.MqConstants;
+import com.dianping.xpro.mq.SeckillOrderMessage;
 import com.dianping.xpro.service.ISeckillVoucherService;
 import com.dianping.xpro.service.IVoucherOrderService;
-import com.baomidou.mybatisplus.spring.service.impl.ServiceImpl;
-import org.springframework.stereotype.Service;
-import com.dianping.xpro.dto.Result;
-
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.boot.context.event.ApplicationReadyEvent;
-import org.springframework.context.annotation.Lazy;
-import org.springframework.context.event.EventListener;
-import org.springframework.core.io.ClassPathResource;
-import org.springframework.data.redis.RedisSystemException;
-import org.springframework.data.redis.connection.stream.Consumer;
-import org.springframework.data.redis.connection.stream.MapRecord;
-import org.springframework.data.redis.connection.stream.ReadOffset;
-import org.springframework.data.redis.connection.stream.StreamOffset;
-import org.springframework.data.redis.connection.stream.StreamReadOptions;
-import org.springframework.data.redis.core.RedisCallback;
-import org.springframework.data.redis.core.StringRedisTemplate;
-import org.springframework.data.redis.core.script.DefaultRedisScript;
-
+import com.dianping.xpro.utils.RedisConstants;
 import com.dianping.xpro.utils.RedisIdWorker;
 import com.dianping.xpro.utils.UserHolder;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.apache.rocketmq.client.producer.LocalTransactionState;
+import org.apache.rocketmq.client.producer.TransactionSendResult;
+import org.apache.rocketmq.spring.core.RocketMQTemplate;
+import org.springframework.dao.DuplicateKeyException;
+import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.messaging.support.MessageBuilder;
+import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
-import java.nio.charset.StandardCharsets;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Map;
-import java.time.Duration;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-
-import jakarta.annotation.PreDestroy;
+import java.time.LocalDateTime;
 
 /**
- * <p>
- *  服务实现类
- * </p>
+ * 秒杀下单：入口以 RocketMQ 事务消息驱动，库存竞争发生在 Redis 预占阶段。
+ *
+ * <p>入口链路：生成本次请求唯一的 orderId → 发出携带 orderId/userId/voucherId 的半消息 →
+ * 事务监听器执行 {@code seckill.lua} 预占 → 按预占结果 COMMIT 或 ROLLBACK。
+ * 半消息在提交前对消费者不可见，因此"预占成功但消息未发出"的窗口由 Broker 回查兜住。</p>
  */
+@Slf4j
 @Service
+@RequiredArgsConstructor
 public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, VoucherOrder> implements IVoucherOrderService {
-    @Autowired
-    private ISeckillVoucherService seckillVoucherService;
-    @Autowired
-    private RedisIdWorker redisIdWorker;
-    @Autowired
-    private StringRedisTemplate stringRedisTemplate;
-    @Autowired
-    @Lazy
-    private VoucherOrderServiceImpl proxy;
-    // @Autowired
-    // private VoucherOrderServiceImpl proxy;
-    private static final DefaultRedisScript<Long> seckillScript = new DefaultRedisScript<>();
-    static {
-        seckillScript.setLocation(new ClassPathResource("seckill.lua"));
-        seckillScript.setResultType(Long.class);
-    }
-    private static final String STREAM_ORDERS = "stream.orders";
-    private static final String GROUP_NAME = "g1";
-    private static final String CONSUMER_NAME = "c1";
-    private final ExecutorService seckill_order_handler = Executors.newSingleThreadExecutor();
-    // 创建线程任务
-    private class VoucherOrderHandler implements Runnable {
-        @Override
-        public void run() {
-            while (!Thread.currentThread().isInterrupted()) {
-                try {
-                    List<MapRecord<String, Object, Object>> list = stringRedisTemplate.opsForStream().read(
-                        Consumer.from(GROUP_NAME, CONSUMER_NAME),
-                        StreamReadOptions.empty().count(1).block(Duration.ofSeconds(2)),
-                        StreamOffset.create(STREAM_ORDERS, ReadOffset.lastConsumed())
-                    );
-                    if (list == null || list.isEmpty()) {
-                        continue;
-                    }
-                    MapRecord<String, Object, Object> record = list.get(0);
-                    VoucherOrder voucherOrder = mapToVoucherOrder(record.getValue());
-                    // 5. 生成订单
-                    handleVoucherOrder(voucherOrder);
-                    stringRedisTemplate.opsForStream().acknowledge(STREAM_ORDERS, GROUP_NAME, record.getId());
-                } catch (Exception e) {
-                    if (Thread.currentThread().isInterrupted()) {
-                        return;
-                    }
-                    e.printStackTrace();
-                    handlePendingList();
-                }
-            }
-        }
-    }
-    // Start after the application context and transactional proxy are ready.
-    @EventListener(ApplicationReadyEvent.class)
-    public void init() {
-        createStreamGroup();
-        seckill_order_handler.submit(new VoucherOrderHandler());
-    }
-    @PreDestroy
-    public void shutdown() {
-        seckill_order_handler.shutdownNow();
-    }
-    private void handleVoucherOrder(VoucherOrder voucherOrder) {
-         proxy.createVoucherOrder(voucherOrder);
-    }
-    private void handlePendingList() {
-        while (!Thread.currentThread().isInterrupted()) {
-            try {
-                 List<MapRecord<String,Object,Object>> list = stringRedisTemplate.opsForStream().read(
-                                     Consumer.from(GROUP_NAME, CONSUMER_NAME),
-                                     StreamReadOptions.empty().count(1),
-                                     StreamOffset.create(STREAM_ORDERS, ReadOffset.from("0"))
-                                 );
 
-                if (list == null || list.isEmpty()) {
-                    break;
-                }
-                MapRecord<String, Object, Object> record = list.get(0);
-                VoucherOrder voucherOrder = mapToVoucherOrder(record.getValue());
-                handleVoucherOrder(voucherOrder);
-                stringRedisTemplate.opsForStream().acknowledge(STREAM_ORDERS, GROUP_NAME, record.getId());
-            } catch (Exception e) {
-                e.printStackTrace();
-                break;
-            }
-        }
-    }
-    private VoucherOrder mapToVoucherOrder(Map<Object, Object> value) {
-        VoucherOrder voucherOrder = new VoucherOrder();
-        voucherOrder.setId(Long.valueOf(value.get("id").toString()));
-        voucherOrder.setUserId(Long.valueOf(value.get("userId").toString()));
-        voucherOrder.setVoucherId(Long.valueOf(value.get("voucherId").toString()));
-        return voucherOrder;
-    }
-    private void createStreamGroup() {
-        try {
-            stringRedisTemplate.execute((RedisCallback<Object>) connection -> {
-                connection.execute(
-                    "XGROUP",
-                    "CREATE".getBytes(StandardCharsets.UTF_8),
-                    STREAM_ORDERS.getBytes(StandardCharsets.UTF_8),
-                    GROUP_NAME.getBytes(StandardCharsets.UTF_8),
-                    "0".getBytes(StandardCharsets.UTF_8),
-                    "MKSTREAM".getBytes(StandardCharsets.UTF_8)
-                );
-                return null;
-            });
-        } catch (RedisSystemException e) {
-            // Spring Data Redis may wrap BUSYGROUP in the cause of this exception.
-            for (Throwable cause = e; cause != null; cause = cause.getCause()) {
-                if (cause.getMessage() != null && cause.getMessage().contains("BUSYGROUP")) {
-                    return;
-                }
-            }
-            throw e;
-        }
-    }
-    // @Override
-    // @Override
-    // public Result seckillVoucher(Long voucherId) {
-    //     // 1. 获取秒杀券信息
-    //     SeckillVoucher seckillVoucher = seckillVoucherService.getById(voucherId);
-    //     // 2. 判断秒杀卷是否可用
-    //     if (seckillVoucher == null) {
-    //         return Result.fail("秒杀券不存在");
-    //     }
-    //     if (seckillVoucher.getBeginTime().isAfter(LocalDateTime.now())) {
-    //         return Result.fail("秒杀未开始");
-    //     }
-    //     if (seckillVoucher.getEndTime().isBefore(LocalDateTime.now())) {
-    //         return Result.fail("秒杀已结束");
-    //     }
-    //     if(seckillVoucher.getStock() <= 0) {
-    //         return Result.fail("秒杀券已售罄");
-    //     }
-    //     Long userId = UserHolder.getUser().getId();
-    //     RLock lock = redissonClient.getLock("lock:order:" + userId);
-    //     boolean lockResult = lock.tryLock();
-    //     if (!lockResult) {
-    //         return Result.fail("请稍后再试");
-    //     }
-    //     try {
-    //         return proxy.createVoucherOrder(voucherId);
-    //     } finally {
-    //         lock.unlock();
-    //     }
-    // }
+    private final ISeckillVoucherService seckillVoucherService;
+    private final RedisIdWorker redisIdWorker;
+    private final StringRedisTemplate stringRedisTemplate;
+    private final RocketMQTemplate rocketMQTemplate;
+    private final ObjectMapper objectMapper;
+
+    /**
+     * 秒杀入口。orderId 在发送半消息之前生成，作为业务事务 id 贯穿半消息、预占结果与订单主键。
+     */
     @Override
     public Result seckillVoucher(Long voucherId) {
         Long userId = UserHolder.getUser().getId();
         long orderId = redisIdWorker.nextId("order");
-        Long result = stringRedisTemplate.execute(seckillScript, new ArrayList<>(), voucherId.toString(), userId.toString(), String.valueOf(orderId));
-        if(result == 0) {
-            // 5. 返回订单信息
-            return Result.ok(orderId);
+        try {
+            String body = objectMapper.writeValueAsString(
+                    new SeckillOrderMessage(orderId, userId, voucherId));
+            TransactionSendResult sendResult = rocketMQTemplate.sendMessageInTransaction(
+                    MqConstants.SECKILL_ORDER_TOPIC,
+                    MessageBuilder.withPayload(body).build(),
+                    null);
+
+            LocalTransactionState state = sendResult.getLocalTransactionState();
+            if (state == LocalTransactionState.COMMIT_MESSAGE) {
+                return Result.ok(orderId);
+            }
+            if (state == LocalTransactionState.ROLLBACK_MESSAGE) {
+                return Result.fail(describeReject(orderId, voucherId, userId));
+            }
+            // 本地事务结果未知：不得谎报成功，也不宜直接判失败。
+            return Result.fail("下单请求处理中，请稍后查询订单");
+        } catch (Exception e) {
+            log.error("秒杀半消息发送失败, voucherId={}, userId={}", voucherId, userId, e);
+            return Result.fail("下单失败，请稍后重试");
         }
-        if(result == 1) {
-            return Result.fail("秒杀券已售罄");
-        }
-        if(result == 2) {
-            return Result.fail("用户已购买该秒杀券");
-        }
-        return Result.fail("秒杀失败");
     }
 
-    @Transactional(rollbackFor = Exception.class)
-    public void createVoucherOrder(VoucherOrder voucherOrder) {
-        // 3. 可用的话减少库存
-        // 下面这两行会带来并发问题，先查后直接更新
-        // seckillVoucher.setStock(seckillVoucher.getStock() - 1);
-        // seckillVoucherService.updateById(seckillVoucher);
-        boolean success = seckillVoucherService.update()   //修改第一张表
-            .setSql("stock = stock - 1")       // 【核心1】数据库原子扣减
-            .eq("voucher_id", voucherOrder.getVoucherId())
-            .gt("stock", 0)            // 【核心2】判断库存是否充足
-            .update();
-        if (!success) {
-            return;
+    /**
+     * 事务监听器只回报 ROLLBACK，具体原因需回读预占结果与当前库存判断。
+     * 并发下原因可能不精确，仅用于提示文案。
+     */
+    private String describeReject(Long orderId, Long voucherId, Long userId) {
+        String state = stringRedisTemplate.opsForValue()
+                .get(RedisConstants.SECKILL_TX_KEY + orderId);
+        if (!RedisConstants.SECKILL_TX_REJECTED.equals(state)) {
+            return "秒杀失败";
         }
-        save(voucherOrder);
+        String stock = stringRedisTemplate.opsForValue()
+                .get(RedisConstants.SECKILL_STOCK_KEY + voucherId);
+        if (stock == null || Long.parseLong(stock) <= 0) {
+            return "秒杀券已售罄";
+        }
+        if (Boolean.TRUE.equals(stringRedisTemplate.opsForHash()
+                .hasKey(RedisConstants.SECKILL_ORDER_KEY + voucherId, userId.toString()))) {
+            return "用户已购买该秒杀券";
+        }
+        return "秒杀失败";
+    }
+
+    /**
+     * 幂等落单。由建单消费者调用，重复投递不得重复扣减库存。
+     */
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public void createVoucherOrder(SeckillOrderMessage message) {
+        // 1. 先插订单：订单主键与 (user_id, voucher_id) 唯一约束共同充当幂等闸门，
+        //    让重复投递在最早一步失败，不做无用的库存扣减。
+        VoucherOrder order = new VoucherOrder()
+                .setId(message.orderId())
+                .setUserId(message.userId())
+                .setVoucherId(message.voucherId())
+                .setPayType(1)
+                .setStatus(1)
+                .setCreateTime(LocalDateTime.now());
+        try {
+            save(order);
+        } catch (DuplicateKeyException e) {
+            if (getById(message.orderId()) != null) {
+                // 同一订单的重复投递，按幂等成功处理。
+                return;
+            }
+            // 同用户同券但订单号不同：说明入口预占出现异常，不能静默放过。
+            throw e;
+        }
+
+        // 2. 条件扣减数据库库存。失败必须抛出：静默返回会让"已建单但未扣库存"被当成消费成功。
+        boolean success = seckillVoucherService.update()
+                .setSql("stock = stock - 1")
+                .eq("voucher_id", message.voucherId())
+                .gt("stock", 0)
+                .update();
+        if (!success) {
+            throw new IllegalStateException("数据库库存扣减失败, voucherId=" + message.voucherId());
+        }
     }
 }

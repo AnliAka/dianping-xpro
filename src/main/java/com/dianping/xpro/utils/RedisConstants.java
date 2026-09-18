@@ -21,6 +21,20 @@ public class RedisConstants {
 
     /** 秒杀库存键前缀，完整键为 seckill:stock:{voucherId}。 */
     public static final String SECKILL_STOCK_KEY = "seckill:stock:";
+    /** 秒杀下单资格键前缀，完整键为 seckill:order:{voucherId}，类型为 HASH：userId -> orderId。 */
+    public static final String SECKILL_ORDER_KEY = "seckill:order:";
+    /** 秒杀预占事务结果键前缀，完整键为 seckill:tx:{orderId}。 */
+    public static final String SECKILL_TX_KEY = "seckill:tx:";
+    /**
+     * 预占事务结果保留期，单位小时。
+     * 必须大于「事务回查窗口」与「半消息发送重试窗口」的较大值：键过期后回查会读到无记录并
+     * 返回 UNKNOWN，已预占成功的请求将随回查耗尽被丢弃，且不留痕迹。
+     */
+    public static final Long SECKILL_TX_TTL = 24L;
+    /** 预占成功标记，回查据此返回 COMMIT。 */
+    public static final String SECKILL_TX_SUCCESS = "SUCCESS";
+    /** 明确业务拒绝标记，回查据此返回 ROLLBACK；执行异常不得写入该值。 */
+    public static final String SECKILL_TX_REJECTED = "REJECTED";
     public static final String BLOG_LIKED_KEY = "blog:liked:";
     public static final String FEED_KEY = "feed:";
     public static final String SHOP_GEO_KEY = "shop:geo:";

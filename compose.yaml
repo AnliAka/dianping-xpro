@@ -65,6 +65,58 @@ services:
       retries: 10
       start_period: 10s
 
+  # RocketMQ 事务消息。namesrv 供客户端寻址，broker 承载半消息与事务回查。
+  # 应用不在容器里跑时，broker 通过 brokerIP1=127.0.0.1 + 端口映射对宿主机可见。
+  rocketmq-namesrv:
+    image: apache/rocketmq:5.1.4
+    container_name: dianping-rocketmq-namesrv
+    restart: unless-stopped
+    ports:
+      - "${ROCKETMQ_NAMESRV_PORT:-9876}:9876"
+    environment:
+      JAVA_OPT_EXT: "-Xms256m -Xmx256m"
+    command: sh mqnamesrv
+    volumes:
+      - rocketmq-namesrv-logs:/home/rocketmq/logs
+    healthcheck:
+      test: ["CMD-SHELL", "sh mqadmin clusterList -n 127.0.0.1:9876 >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  rocketmq-broker:
+    image: apache/rocketmq:5.1.4
+    container_name: dianping-rocketmq-broker
+    restart: unless-stopped
+    # named volume 由 Docker 以 root 创建，而镜像默认以 rocketmq(uid 3000) 运行，
+    # 无权写入 store/logs。broker 会在启动阶段失败并以退出码 255 反复重启，
+    # 且失败信息被 logback 初始化日志吞掉，只留下一段 shutdown 的 NPE。
+    # 开发环境以 root 运行规避；生产应改用 chown 初始化或 fsGroup。
+    user: root
+    depends_on:
+      rocketmq-namesrv:
+        condition: service_healthy
+    ports:
+      - "${ROCKETMQ_BROKER_PORT:-10911}:10911"
+      - "${ROCKETMQ_BROKER_VIP_PORT:-10909}:10909"
+    environment:
+      NAMESRV_ADDR: rocketmq-namesrv:9876
+      # 镜像基于 JDK 8，runbroker.sh 已带 G1 相关参数（不支持固定 -Xmn），
+      # 追加 -Xmn 会让 JVM 启动失败，表现为容器以退出码 255 反复重启。这里只限制堆上下限。
+      JAVA_OPT_EXT: "-Xms512m -Xmx512m"
+    # 必须挂到镜像里已存在的 conf 目录。挂到不存在的路径时 Docker 建出的是目录而不是文件，
+    # -c 会读到 FileNotFoundException 并以退出码 255 直接退出。
+    command: sh mqbroker -c /home/rocketmq/rocketmq-5.1.4/conf/my-broker.conf
+    volumes:
+      - ./docker/rocketmq/broker.conf:/home/rocketmq/rocketmq-5.1.4/conf/my-broker.conf:ro
+      - rocketmq-broker-store:/home/rocketmq/store
+      # 注意：broker 以 root 运行（见上方 user: root），user.home=/root，
+      # RocketMQ 按 ${user.home}/logs/rocketmqlogs 写日志，所以这里必须挂 /root/logs。
+      # 挂到 /home/rocketmq/logs 只会得到一个空目录，日志被留在容器可写层里、down 即丢，
+      # 而 transaction.log（事务回查的唯一记录）也就在那里。
+      - rocketmq-broker-logs:/root/logs
+
   # 应用容器。默认不随 up 启动，用 profile 控制：
   #   docker compose --profile app up -d --build
   app:
@@ -80,8 +132,11 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      rocketmq-namesrv:
+        condition: service_healthy
     environment:
       # 容器内用服务名寻址，覆盖 application.yml 里的本机地址。
+      ROCKETMQ_NAME_SERVER: rocketmq-namesrv:9876
       SPRING_DATASOURCE_URL: >-
         jdbc:mysql://mysql:3306/${DB_NAME:-dianping_xpro}?useSSL=false&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true
       SPRING_DATASOURCE_USERNAME: root
@@ -99,3 +154,6 @@ services:
 volumes:
   mysql-data:
   redis-data:
+  rocketmq-namesrv-logs:
+  rocketmq-broker-store:
+  rocketmq-broker-logs:

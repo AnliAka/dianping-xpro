@@ -19,6 +19,7 @@
         <hutool.version>5.8.47</hutool.version>
         <!-- Compatible with the Netty 4.1 line managed by Spring Boot 3.5. -->
         <redisson.version>3.52.0</redisson.version>
+        <rocketmq-spring.version>2.3.1</rocketmq-spring.version>
     </properties>
     <dependencies>
         <dependency>
@@ -74,6 +75,12 @@
             <groupId>com.h2database</groupId>
             <artifactId>h2</artifactId>
             <scope>test</scope>
+        </dependency>
+        <!-- rocketmq：秒杀链路的事务消息与订单消费 -->
+        <dependency>
+            <groupId>org.apache.rocketmq</groupId>
+            <artifactId>rocketmq-spring-boot-starter</artifactId>
+            <version>${rocketmq-spring.version}</version>
         </dependency>
     
     </dependencies>

@@ -1,15 +1,16 @@
 # Docker 环境说明
 
-用 `compose.yaml` 在本机拉起 MySQL 8 与 Redis 7，应用可以选择跑在容器里，也可以继续在
+用 `compose.yaml` 在本机拉起 MySQL 8、Redis 7 与 RocketMQ，应用可以选择跑在容器里，也可以继续在
 IDE / `java -jar` 里跑。两种方式共用同一套中间件。
 
 ## 文件一览
 
 | 文件 | 作用 |
 | --- | --- |
-| `compose.yaml` | 编排 MySQL、Redis 与可选的应用容器 |
+| `compose.yaml` | 编排 MySQL、Redis、RocketMQ 与可选的应用容器 |
 | `Dockerfile` | 应用运行镜像，多阶段构建，最终只有 JRE + jar |
 | `Dockerfile.build` | 单独的编译阶段镜像，便于复用 Maven 依赖缓存 |
+| `docker/rocketmq/broker.conf` | RocketMQ broker 配置，含事务回查参数 |
 | `.dockerignore` | 构建上下文排除项，防止本机配置与产物进镜像 |
 | `docker/README.md` | 本文件 |
 
@@ -18,18 +19,21 @@ IDE / `java -jar` 里跑。两种方式共用同一套中间件。
 应用在 IDE 里跑，中间件交给 Docker：
 
 ```bash
-docker compose up -d mysql redis
+docker compose up -d mysql redis rocketmq-namesrv rocketmq-broker
 docker compose ps
 ```
 
-宿主机端口刻意错开了系统默认值，避免和本机已装的 MySQL / Redis 打架：
+宿主机端口刻意错开了系统默认值，避免和本机已装的中间件打架：
 
 | 服务 | 宿主机端口 | 容器内端口 | 账号 / 密码 |
 | --- | --- | --- | --- |
 | MySQL | `3307` | `3306` | `root` / `1234` |
 | Redis | `6380` | `6379` | 密码 `1` |
+| RocketMQ namesrv | `9876` | `9876` | 无 |
+| RocketMQ broker | `10911` / `10909` | 同左 | 无 |
 
-也就是说，本地连库要写 `localhost:3307`，连 Redis 写 `localhost:6380`。
+也就是说，本地连库要写 `localhost:3307`，连 Redis 写 `localhost:6380`，连 RocketMQ 写
+`localhost:9876`。
 
 端口和密码都可以用环境变量覆盖，例如：
 
@@ -46,10 +50,18 @@ MYSQL_PORT=3306 REDIS_PORT=6379 docker compose up -d mysql redis
 
 ```bash
 docker compose down -v
-docker compose up -d mysql redis
+docker compose up -d mysql redis rocketmq-namesrv rocketmq-broker
 ```
 
 `-v` 会删除数据卷，本地数据一起没，确认清楚再执行。
+
+**已有数据卷时新增的约束不会自动生效**，例如本轮给 `tb_voucher_order` 加的
+`uk_user_voucher (user_id, voucher_id)`，需要手工执行：
+
+```sql
+ALTER TABLE tb_voucher_order
+  ADD UNIQUE KEY uk_user_voucher (user_id, voucher_id);
+```
 
 ## 二、让应用也在容器里跑
 
@@ -58,8 +70,8 @@ docker compose --profile app up -d --build
 docker compose logs -f app
 ```
 
-应用容器里通过服务名访问中间件（`mysql:3306`、`redis:6379`），这些地址由
-`compose.yaml` 的环境变量注入，不需要改 `application.yml`。
+应用容器里通过服务名访问中间件（`mysql:3306`、`redis:6379`、`rocketmq-namesrv:9876`），
+这些地址由 `compose.yaml` 的环境变量注入，不需要改 `application.yml`。
 
 ### 命令行单独起应用（`java -jar`）
 
@@ -79,7 +91,7 @@ spring:
 ```
 
 `optional:` 前缀保证文件不存在时不报错，回落到默认值。因此只要在**运行目录**下放一个
-`config/application-local.yml`，密码和本机路径就能被读到，而这个文件不入版本库、
+`config/application-local.yml`，密码和本机地址就能被读到，而这个文件不入版本库、
 也不打进 jar：
 
 ```
@@ -94,39 +106,54 @@ spring:
 
 容器场景下 `compose.yaml` 已把宿主机的 `./config` 挂到 `/app/config`，同一份文件两边通用。
 
-## 三、Redis Stream 消费者组与重启
+## 三、RocketMQ 事务消息与入口预占
 
-秒杀链路是异步的：
+秒杀入口是同步事务消息：
 
 ```
-seckill.lua  →  XADD stream.orders  →  消费者线程  →  落库 tb_voucher_order
+生成本次请求唯一的 orderId
+  → 发送半消息（携带 orderId / userId / voucherId）
+  → 本地事务执行 seckill.lua：幂等检查 → 校验库存与一人一单 → 扣减 + 记录购买关系 → 写 SUCCESS
+  → 预占成功 COMMIT，明确业务拒绝 ROLLBACK，结果未知 UNKNOWN
+  → 消费者按 orderId 幂等落单 tb_voucher_order
 ```
 
-消费者组 `g1` 由 `VoucherOrderServiceImpl.createStreamGroup()` 在应用启动时创建
-（`XGROUP CREATE ... MKSTREAM`）。
+半消息在 COMMIT 之前对消费者不可见，因此"预占成功但消息没发出去"由 Broker 回查兜住。
+回查只读 `seckill:tx:{orderId}` 解释结果，不重新执行预占，也不依赖尚未创建的订单。
 
-**关键点：Redis 开启 AOF 持久化后，消费者组已存在，应用再次启动会收到
-`BUSYGROUP Consumer Group name already exists`。**
+### Redis 键约定
 
-这个异常不能直接当失败处理，否则重启就崩。代码里的处理方式是沿异常 cause 链查找：
+| 键 | 类型 | 含义 |
+| --- | --- | --- |
+| `seckill:stock:{voucherId}` | string | 剩余库存 |
+| `seckill:order:{voucherId}` | hash | userId → orderId，用于一人一单 |
+| `seckill:tx:{orderId}` | string | `SUCCESS` / `REJECTED`，TTL 24 小时 |
 
-```java
-} catch (RedisSystemException e) {
-    for (Throwable cause = e; cause != null; cause = cause.getCause()) {
-        if (cause.getMessage() != null && cause.getMessage().contains("BUSYGROUP")) {
-            return;
-        }
-    }
-    throw e;
-}
+`seckill:tx:{orderId}` 的 TTL 必须大于「事务回查窗口」与「半消息发送重试窗口」的较大值。
+键一旦过期，回查会读到无记录并返回 UNKNOWN，已预占成功的请求将随回查耗尽被丢弃，且不留痕迹。
+
+### broker.conf 中的回查参数
+
+```
+transactionTimeOut = 6000         # 超过该时间未收到决议即发起回查
+transactionCheckMax = 15          # 最多回查次数，耗尽后半消息被丢弃
+transactionCheckInterval = 60000  # 回查扫描间隔
 ```
 
-不能只看外层的 `e.getMessage()`。Spring Data Redis 会把原始错误包在 cause 里，
-外层 `RedisSystemException` 的 message 固定是 `"Error in execution"`，
-`BUSYGROUP` 只存在于 cause 链中。只判断外层的话，这个分支永远不会命中。
+开发环境 broker 用 `ASYNC_FLUSH`，若要验证"半消息已落盘则重启不丢"，需改为 `SYNC_FLUSH`。
 
-`compose.yaml` 里 Redis 默认开启 `appendonly yes` + `appendfsync everysec`，
-重启不丢消费者的 pending 消息。
+### 从 Redis Stream 迁移过来的注意点
+
+旧版本用 `XADD stream.orders` + 消费者组 `g1` 落单，现已整体移除。迁移时有三处旧状态要清：
+
+```bash
+redis-cli -a 1 DEL seckill:order:10    # 旧值是 SET，新脚本按 HASH 读取会报 WRONGTYPE
+redis-cli -a 1 DEL stream.orders       # 旧消息流，已无代码读写
+redis-cli -a 1 DEL seckill:tx:10       # 如调试期间残留了旧的 tx 标记
+```
+
+不清 `seckill:order:{voucherId}` 的话，预占脚本会在 `HEXISTS` 处直接报 `WRONGTYPE`，
+表现为所有请求都失败。
 
 ## 四、常见问题
 
@@ -140,9 +167,15 @@ seckill.lua  →  XADD stream.orders  →  消费者线程  →  落库 tb_vouch
 
 **应用连不上中间件**
 
-先确认 `docker compose ps` 里两个服务都是 `healthy`。应用依赖
-`condition: service_healthy`，健康检查没过就不会启动。
+先确认 `docker compose ps` 里服务都是 `healthy`。应用依赖 `condition: service_healthy`，
+健康检查没过就不会启动。
+
+**应用连不上 broker**
+
+RocketMQ 客户端会先连 namesrv 取 broker 地址，再直连 broker。应用在宿主机运行时，
+broker 必须上报宿主机可达的地址——`docker/rocketmq/broker.conf` 里的 `brokerIP1 = 127.0.0.1`
+就是为此设置，同时 compose 里映射了 `10911` 端口。缺任一项都会连不上。
 
 **改了 SQL 想重新初始化**
 
-同样需要 `docker compose down -v`，注意这会清空本地数据。
+需要 `docker compose down -v`，注意这会清空本地数据。

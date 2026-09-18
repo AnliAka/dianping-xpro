@@ -23,3 +23,22 @@ mybatis-plus:
   configuration:
     map-underscore-to-camel-case: true # 下划线映射为驼峰命名
     log-impl: org.apache.ibatis.logging.stdout.StdOutImpl # 打印SQL语句
+rocketmq:
+  # 秒杀入口的事务消息由此发出；回查由 Producer 侧的 TransactionListener 回答。
+  # 本机地址见 config/application-local.yml。
+  name-server: ${ROCKETMQ_NAME_SERVER:localhost:9876}
+  producer:
+    group: ${ROCKETMQ_PRODUCER_GROUP:dianping-xpro-order-producer}
+    # 半消息发送超时。超时按发送失败处理，本次请求的本地事务不会执行。
+    send-message-timeout: 3000
+
+app:
+  # 测试用确定性故障注入，默认全部关闭，生产环境保持关闭。
+  # 只在复现"崩溃窗口"时用命令行参数打开，不写进任何配置文件：
+  #   --app.fault.enabled=true --app.fault.exit-after-reserve=true --app.fault.target-voucher-id=11
+  # target-voucher-id > 0 时故障只对该券生效，避免被历史遗留的重试消息误触发。
+  fault:
+    enabled: ${FAULT_ENABLED:false}
+    exit-after-reserve: ${FAULT_EXIT_AFTER_RESERVE:false}
+    exit-after-consume-commit: ${FAULT_EXIT_AFTER_CONSUME_COMMIT:false}
+    target-voucher-id: ${FAULT_TARGET_VOUCHER_ID:0}
