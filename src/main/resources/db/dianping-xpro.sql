@@ -1269,13 +1269,34 @@ CREATE TABLE `tb_voucher_order`  (
   `voucher_id` bigint(20) UNSIGNED NOT NULL COMMENT '购买的代金券id',
   `pay_type` tinyint(1) UNSIGNED NOT NULL DEFAULT 1 COMMENT '支付方式 1：余额支付；2：支付宝；3：微信',
   `status` tinyint(1) UNSIGNED NOT NULL DEFAULT 1 COMMENT '订单状态，1：未支付；2：已支付；3：已核销；4：已取消；5：退款中；6：已退款',
+  `active_voucher_id` bigint(20) UNSIGNED GENERATED ALWAYS AS (IF(`status` = 4, NULL, `voucher_id`)) STORED COMMENT '未取消订单的券id，用于条件唯一约束',
+  `pay_deadline` datetime(3) NULL DEFAULT NULL COMMENT '支付截止时间；NULL 为历史订单，不参与超时关单',
   `create_time` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '下单时间',
   `pay_time` timestamp NULL DEFAULT NULL COMMENT '支付时间',
   `use_time` timestamp NULL DEFAULT NULL COMMENT '核销时间',
   `refund_time` timestamp NULL DEFAULT NULL COMMENT '退款时间',
   `update_time` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
   PRIMARY KEY (`id`) USING BTREE,
-  UNIQUE KEY `uk_user_voucher` (`user_id`, `voucher_id`) USING BTREE
+  UNIQUE KEY `uk_user_active_voucher` (`user_id`, `active_voucher_id`) USING BTREE,
+  INDEX `idx_user_voucher` (`user_id`, `voucher_id`) USING BTREE,
+  INDEX `idx_status_deadline`(`status`, `pay_deadline`) USING BTREE
+) ENGINE = InnoDB CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci ROW_FORMAT = Compact;
+
+-- ----------------------------
+-- Table structure for tb_order_outbox
+-- ----------------------------
+DROP TABLE IF EXISTS `tb_order_outbox`;
+CREATE TABLE `tb_order_outbox`  (
+  `id` bigint(20) UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '主键',
+  `order_id` bigint(20) NOT NULL COMMENT '关联订单id',
+  `type` varchar(32) NOT NULL COMMENT '消息类型：CLOSE_REMIND-关单提醒；STOCK_RELEASE-预占释放',
+  `payload` varchar(512) NOT NULL COMMENT '消息体 JSON',
+  `status` tinyint(1) UNSIGNED NOT NULL DEFAULT 0 COMMENT '0：待发布；1：已发布',
+  `create_time` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+  `publish_time` timestamp NULL DEFAULT NULL COMMENT '发布时间',
+  PRIMARY KEY (`id`) USING BTREE,
+  INDEX `idx_status`(`status`) USING BTREE,
+  INDEX `idx_order`(`order_id`) USING BTREE
 ) ENGINE = InnoDB CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci ROW_FORMAT = Compact;
 
 -- ----------------------------

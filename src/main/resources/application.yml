@@ -33,6 +33,10 @@ rocketmq:
     send-message-timeout: 3000
 
 app:
+  # 订单支付截止时长（分钟）。超过该时间未支付的订单将被关单并释放库存预占。
+  # 演示/测试超时关单时可设为 1。
+  order:
+    pay-deadline-minutes: ${ORDER_PAY_DEADLINE_MINUTES:10}
   # 测试用确定性故障注入，默认全部关闭，生产环境保持关闭。
   # 只在复现"崩溃窗口"时用命令行参数打开，不写进任何配置文件：
   #   --app.fault.enabled=true --app.fault.exit-after-reserve=true --app.fault.target-voucher-id=11
@@ -41,4 +45,5 @@ app:
     enabled: ${FAULT_ENABLED:false}
     exit-after-reserve: ${FAULT_EXIT_AFTER_RESERVE:false}
     exit-after-consume-commit: ${FAULT_EXIT_AFTER_CONSUME_COMMIT:false}
+    drop-close-remind: ${FAULT_DROP_CLOSE_REMIND:false}
     target-voucher-id: ${FAULT_TARGET_VOUCHER_ID:0}

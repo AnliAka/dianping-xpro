@@ -3,6 +3,8 @@ package com.dianping.xpro.entity;
 import com.baomidou.mybatisplus.annotation.IdType;
 import com.baomidou.mybatisplus.annotation.TableId;
 import com.baomidou.mybatisplus.annotation.TableName;
+import com.fasterxml.jackson.databind.annotation.JsonSerialize;
+import com.fasterxml.jackson.databind.ser.std.ToStringSerializer;
 import lombok.Data;
 import lombok.EqualsAndHashCode;
 import lombok.experimental.Accessors;
@@ -22,6 +24,7 @@ public class VoucherOrder implements Serializable {
      * 主键
      */
     @TableId(value = "id", type = IdType.INPUT)
+    @JsonSerialize(using = ToStringSerializer.class)
     private Long id;
 
     /**
@@ -40,9 +43,15 @@ public class VoucherOrder implements Serializable {
     private Integer payType;
 
     /**
-     * 订单状态，1：未支付；2：已支付；3：已核销；4：已取消；5：退款中；6：已退款
+     * 订单状态，见 OrderStatus 常量：1 未支付；2 已支付；4 已取消
      */
     private Integer status;
+
+    /**
+     * 支付截止时间。超过该时间仍未支付，订单将被关单并释放预占。
+     * 历史订单为 NULL，不参与超时关单。
+     */
+    private LocalDateTime payDeadline;
 
     /**
      * 下单时间

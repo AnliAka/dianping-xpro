@@ -13,6 +13,8 @@ import org.springframework.stereotype.Component;
  *       此位置终止会让半消息保持未决，重启后只能靠事务回查收敛。</li>
  *   <li>{@code exit-after-consume-commit}：建单事务已提交、但尚未确认消费。
  *       此位置终止会让同一消息被重投，用来验证消费端幂等。</li>
+ *   <li>{@code drop-close-remind}：Outbox relay 丢弃关单提醒消息（标记已发布但不发送）。
+ *       用来验证延迟提醒丢失后，定时扫描兜底关单与库存回收。</li>
  * </ul>
  *
  * <p>总开关 {@code app.fault.enabled} 默认为 false，且 {@code target-voucher-id}
@@ -34,20 +36,23 @@ public class FaultInjector {
     private final boolean enabled;
     private final boolean exitAfterReserve;
     private final boolean exitAfterConsumeCommit;
+    private final boolean dropCloseRemind;
     private final long targetVoucherId;
 
     public FaultInjector(
             @Value("${app.fault.enabled:false}") boolean enabled,
             @Value("${app.fault.exit-after-reserve:false}") boolean exitAfterReserve,
             @Value("${app.fault.exit-after-consume-commit:false}") boolean exitAfterConsumeCommit,
+            @Value("${app.fault.drop-close-remind:false}") boolean dropCloseRemind,
             @Value("${app.fault.target-voucher-id:0}") long targetVoucherId) {
         this.enabled = enabled;
         this.exitAfterReserve = exitAfterReserve;
         this.exitAfterConsumeCommit = exitAfterConsumeCommit;
+        this.dropCloseRemind = dropCloseRemind;
         this.targetVoucherId = targetVoucherId;
         if (enabled) {
-            log.warn("故障注入已启用：exitAfterReserve={}, exitAfterConsumeCommit={}, targetVoucherId={}",
-                    exitAfterReserve, exitAfterConsumeCommit, targetVoucherId);
+            log.warn("故障注入已启用：exitAfterReserve={}, exitAfterConsumeCommit={}, dropCloseRemind={}, targetVoucherId={}",
+                    exitAfterReserve, exitAfterConsumeCommit, dropCloseRemind, targetVoucherId);
         }
     }
 
@@ -75,6 +80,13 @@ public class FaultInjector {
                 + "同一消息将被重投，用于验证消费端幂等。orderId={}, voucherId={}",
                 orderId, voucherId);
         halt();
+    }
+
+    /**
+     * 是否丢弃该券的关单提醒消息（不终止进程，只静默丢消息）。
+     */
+    public boolean dropCloseRemind(long voucherId) {
+        return fire(dropCloseRemind, voucherId);
     }
 
     private boolean fire(boolean switchOn, long voucherId) {
