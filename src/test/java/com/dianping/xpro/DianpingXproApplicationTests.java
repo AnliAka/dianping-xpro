@@ -10,6 +10,7 @@ import com.dianping.xpro.mq.DelayLevels;
 import com.dianping.xpro.mq.FaultInjector;
 import com.dianping.xpro.mq.OrderTransactionListener;
 import com.dianping.xpro.mq.SeckillOrderMessage;
+import com.dianping.xpro.ratelimit.SeckillRateLimiter;
 import com.dianping.xpro.service.IOrderCloseService;
 import com.dianping.xpro.service.ISeckillVoucherService;
 import com.dianping.xpro.service.impl.VoucherOrderServiceImpl;
@@ -192,7 +193,9 @@ class DianpingXproApplicationTests {
                 idWorker,
                 mock(StringRedisTemplate.class),
                 mq,
-                new ObjectMapper());
+                new ObjectMapper(),
+                // 直接 new 的实例 enabled 默认 false，频控放行，不影响本用例的断言。
+                new SeckillRateLimiter(mock(StringRedisTemplate.class)));
         loginAs(1010L);
         try {
             assertThat(service.seckillVoucher(15L).getData())

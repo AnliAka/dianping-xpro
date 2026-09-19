@@ -9,6 +9,7 @@ import com.dianping.xpro.mapper.VoucherOrderMapper;
 import com.dianping.xpro.mq.CloseRemindMessage;
 import com.dianping.xpro.mq.MqConstants;
 import com.dianping.xpro.mq.SeckillOrderMessage;
+import com.dianping.xpro.ratelimit.SeckillRateLimiter;
 import com.dianping.xpro.service.IOrderCloseService;
 import com.dianping.xpro.service.ISeckillVoucherService;
 import com.dianping.xpro.service.IVoucherOrderService;
@@ -35,8 +36,9 @@ import java.time.ZoneId;
 /**
  * 秒杀下单：入口以 RocketMQ 事务消息驱动，库存竞争发生在 Redis 预占阶段。
  *
- * <p>入口链路：生成本次请求唯一的 orderId → 发出携带 orderId/userId/voucherId 的半消息 →
- * 事务监听器执行 {@code seckill.lua} 预占 → 按预占结果 COMMIT 或 ROLLBACK。
+ * <p>入口链路：用户／活动滑动窗口频控 → 生成本次请求唯一的 orderId → 发出携带
+ * orderId/userId/voucherId 的半消息 → 事务监听器执行 {@code seckill.lua} 预占 →
+ * 按预占结果 COMMIT 或 ROLLBACK。
  * 半消息在提交前对消费者不可见，因此"预占成功但消息未发出"的窗口由 Broker 回查兜住。</p>
  *
  * <p>订单生命周期（待支付 → 已支付/已取消）的三个竞争方——支付、用户取消、
@@ -54,17 +56,26 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
     private final StringRedisTemplate stringRedisTemplate;
     private final RocketMQTemplate rocketMQTemplate;
     private final ObjectMapper objectMapper;
+    private final SeckillRateLimiter seckillRateLimiter;
 
     /** 支付截止时长（分钟），见 application.yml 的 app.order.pay-deadline-minutes。 */
     @Value("${app.order.pay-deadline-minutes:10}")
     private long payDeadlineMinutes;
 
     /**
-     * 秒杀入口。orderId 在发送半消息之前生成，作为业务事务 id 贯穿半消息、预占结果与订单主键。
+     * 秒杀入口。双层限流的第二层（用户／活动滑动窗口）在发送半消息之前执行：
+     * 被拒请求不触发预占，无库存副作用。第一层（OpenResty 令牌桶）在网关完成。
+     * orderId 在发送半消息之前生成，作为业务事务 id 贯穿半消息、预占结果与订单主键。
      */
     @Override
     public Result seckillVoucher(Long voucherId) {
         Long userId = UserHolder.getUser().getId();
+
+        if (!seckillRateLimiter.tryAcquire(voucherId, userId)) {
+            log.info("SECKILL_METRICS outcome=USER_REJECTED, voucherId={}, userId={}", voucherId, userId);
+            return Result.fail("操作过于频繁，请稍后再试");
+        }
+
         long orderId = redisIdWorker.nextId("order");
         try {
             String body = objectMapper.writeValueAsString(
@@ -76,18 +87,26 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
 
             LocalTransactionState state = sendResult.getLocalTransactionState();
             if (state == LocalTransactionState.COMMIT_MESSAGE) {
+                log.info("SECKILL_METRICS outcome=ACCEPTED, orderId={}, voucherId={}, userId={}",
+                        orderId, voucherId, userId);
                 // 雪花订单号超过 JavaScript Number 的安全整数范围，必须按字符串返回；
                 // 否则浏览器会把 639250219233445879 舍入成 639250219233445900，
                 // 后续查询和支付都会拿错误的订单号。
                 return Result.ok(Long.toString(orderId));
             }
             if (state == LocalTransactionState.ROLLBACK_MESSAGE) {
-                return Result.fail(describeReject(orderId, voucherId, userId));
+                String reason = describeReject(orderId, voucherId, userId);
+                log.info("SECKILL_METRICS outcome=BUSINESS_REJECTED, orderId={}, voucherId={}, userId={}, reason={}",
+                        orderId, voucherId, userId, reason);
+                return Result.fail(reason);
             }
             // 本地事务结果未知：不得谎报成功，也不宜直接判失败。
+            log.info("SECKILL_METRICS outcome=UNKNOWN, orderId={}, voucherId={}, userId={}",
+                    orderId, voucherId, userId);
             return Result.fail("下单请求处理中，请稍后查询订单");
         } catch (Exception e) {
-            log.error("秒杀半消息发送失败, voucherId={}, userId={}", voucherId, userId, e);
+            log.error("SECKILL_METRICS outcome=SYSTEM_EXCEPTION, orderId={}, voucherId={}, userId={}",
+                    orderId, voucherId, userId, e);
             return Result.fail("下单失败，请稍后重试");
         }
     }

@@ -7,10 +7,14 @@ IDE / `java -jar` 里跑。两种方式共用同一套中间件。
 
 | 文件 | 作用 |
 | --- | --- |
-| `compose.yaml` | 编排 MySQL、Redis、RocketMQ 与可选的应用容器 |
+| `compose.yaml` | 编排 MySQL、Redis、RocketMQ、OpenResty 与可选的应用容器 |
 | `Dockerfile` | 应用运行镜像，多阶段构建，最终只有 JRE + jar |
 | `Dockerfile.build` | 单独的编译阶段镜像，便于复用 Maven 依赖缓存 |
 | `docker/rocketmq/broker.conf` | RocketMQ broker 配置，含事务回查参数 |
+| `docker/openresty/nginx.conf` | OpenResty 网关配置：秒杀路径限流、其余转发 |
+| `docker/openresty/lua/token_bucket.lua` | 共享状态原子令牌桶（`lua_shared_dict` + 自旋锁） |
+| `docker/openresty/lua/seckill_gate.lua` | 秒杀入口门卫：取令牌、计数、429 拒绝 |
+| `docker/openresty/lua/gw_stats.lua` | 网关计数查询（`GET /gateway/stats`） |
 | `.dockerignore` | 构建上下文排除项，防止本机配置与产物进镜像 |
 | `docker/README.md` | 本文件 |
 
@@ -31,6 +35,7 @@ docker compose ps
 | Redis | `6380` | `6379` | 密码 `1` |
 | RocketMQ namesrv | `9876` | `9876` | 无 |
 | RocketMQ broker | `10911` / `10909` | 同左 | 无 |
+| OpenResty 网关 | `8080` | `80` | 无 |
 
 也就是说，本地连库要写 `localhost:3307`，连 Redis 写 `localhost:6380`，连 RocketMQ 写
 `localhost:9876`。
@@ -155,7 +160,34 @@ redis-cli -a 1 DEL seckill:tx:10       # 如调试期间残留了旧的 tx 标�
 不清 `seckill:order:{voucherId}` 的话，预占脚本会在 `HEXISTS` 处直接报 `WRONGTYPE`，
 表现为所有请求都失败。
 
-## 四、常见问题
+## 四、OpenResty 秒杀网关（双层限流第一层）
+
+```bash
+docker compose up -d openresty
+```
+
+请求改走 `http://localhost:8080`（原直连 8081 的方式不变，两者并存）。
+仅 `POST /voucher-order/seckill/{id}` 受全局令牌桶约束，其余路径仅转发。
+令牌桶状态放 `lua_shared_dict`（跨 worker 共享），自旋锁保证「读-补-扣-写」原子性。
+
+| 环境变量 | 默认值 | 含义 |
+| --- | --- | --- |
+| `SECKILL_GATEWAY_ENABLED` | `true` | `false` 时网关仅转发（T3 对照组 A） |
+| `SECKILL_TOKEN_RATE` | `500` | 令牌产生速率（个/秒），占位值，待容量实验固定 |
+| `SECKILL_TOKEN_BURST` | `1000` | 桶容量（突发请求数），占位值，待容量实验固定 |
+| `APP_UPSTREAM` | `host.docker.internal:8081` | 应用地址；应用跑容器时改为 `app:8081` |
+
+第二层（用户／活动滑动窗口）在应用内，参数见 `application.yml` 的
+`app.seckill.rate-limit.*`；`SECKILL_RATE_LIMIT_ENABLED=false` 即「仅令牌桶」的对照组 B。
+
+观测口径：
+
+- 网关拒绝：HTTP 429 + 访问日志 `gw_reject=1`；计数经 `GET /gateway/stats`
+  读取 `{"total":..,"passed":..,"rejected":..}`（进程内存级，网关重启清零）。
+- 用户拒绝 / 业务失败 / 系统异常：应用日志里 `SECKILL_METRICS outcome=USER_REJECTED |
+  BUSINESS_REJECTED | SYSTEM_EXCEPTION`，逐请求可追溯。
+
+## 五、常见问题
 
 **端口被占用**
 

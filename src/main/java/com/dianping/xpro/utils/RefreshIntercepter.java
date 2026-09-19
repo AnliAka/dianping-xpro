@@ -41,4 +41,12 @@ public class RefreshIntercepter implements HandlerInterceptor {
         stringRedisTemplate.expire(loginKey, RedisConstants.LOGIN_USER_TTL, TimeUnit.MINUTES);
         return true;
     }
+
+    @Override
+    public void afterCompletion(@NonNull HttpServletRequest request, @NonNull HttpServletResponse response,
+                                @NonNull Object handler, Exception ex) {
+        // Tomcat 线程复用：不清理 ThreadLocal 的话，下一个不带 token 的请求
+        // 会继承前一个用户的身份，登录校验与"可信 userId"频控都会失效。
+        UserHolder.removeUser();
+    }
 }

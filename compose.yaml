@@ -1,4 +1,4 @@
-# 本地开发用的中间件编排：MySQL 8 + Redis 7，可选再起一个应用容器。
+# 本地开发用的中间件编排：MySQL 8 + Redis 7 + OpenResty 网关，可选再起一个应用容器。
 #
 # 常用命令（在项目根目录执行）：
 #   docker compose up -d mysql redis      # 只起中间件，应用在 IDE / java -jar 里跑
@@ -116,6 +116,25 @@ services:
       # 挂到 /home/rocketmq/logs 只会得到一个空目录，日志被留在容器可写层里、down 即丢，
       # 而 transaction.log（事务回查的唯一记录）也就在那里。
       - rocketmq-broker-logs:/root/logs
+
+  # 单节点 OpenResty 秒杀网关（双层限流第一层：共享状态原子令牌桶）。
+  # 请求经 8080 进入网关，仅 POST /voucher-order/seckill/{id} 受令牌桶约束，其余路径仅转发。
+  # 应用地址在 nginx.conf 的 upstream app_backend 里（默认 host.docker.internal:8081），
+  # 应用也用容器跑时改为 app:8081。到上游走 keepalive 连接池，勿改回每请求新建连接。
+  # 令牌桶速率为 T3 容量实验前的占位值，实验后固定，勿凭感觉调。
+  openresty:
+    image: openresty/openresty:alpine
+    container_name: dianping-openresty
+    restart: unless-stopped
+    ports:
+      - "${OPENRESTY_PORT:-8080}:80"
+    environment:
+      SECKILL_GATEWAY_ENABLED: ${SECKILL_GATEWAY_ENABLED:-true}
+      SECKILL_TOKEN_RATE: ${SECKILL_TOKEN_RATE:-500}
+      SECKILL_TOKEN_BURST: ${SECKILL_TOKEN_BURST:-1000}
+    volumes:
+      - ./docker/openresty/nginx.conf:/usr/local/openresty/nginx/conf/nginx.conf:ro
+      - ./docker/openresty/lua:/usr/local/openresty/nginx/lua:ro
 
   # 应用容器。默认不随 up 启动，用 profile 控制：
   #   docker compose --profile app up -d --build

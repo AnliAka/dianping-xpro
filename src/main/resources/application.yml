@@ -37,6 +37,14 @@ app:
   # 演示/测试超时关单时可设为 1。
   order:
     pay-deadline-minutes: ${ORDER_PAY_DEADLINE_MINUTES:10}
+  # 秒杀双层限流的第二层：登录后按 userId+券ID 的 Redis Lua 滑动窗口频控。
+  # 第一层（OpenResty 令牌桶）参数在 compose.yaml 的 openresty 服务环境变量里。
+  # 以下均为占位值，须按 T3 同链路容量实验固定；enabled=false 即「仅令牌桶」的对照组 B。
+  seckill:
+    rate-limit:
+      enabled: ${SECKILL_RATE_LIMIT_ENABLED:true}
+      window-ms: ${SECKILL_RATE_WINDOW_MS:2000}
+      max-requests: ${SECKILL_RATE_MAX_REQUESTS:5}
   # 测试用确定性故障注入，默认全部关闭，生产环境保持关闭。
   # 只在复现"崩溃窗口"时用命令行参数打开，不写进任何配置文件：
   #   --app.fault.enabled=true --app.fault.exit-after-reserve=true --app.fault.target-voucher-id=11

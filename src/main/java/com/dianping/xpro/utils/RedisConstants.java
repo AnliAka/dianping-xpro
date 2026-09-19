@@ -35,6 +35,8 @@ public class RedisConstants {
     public static final String SECKILL_TX_SUCCESS = "SUCCESS";
     /** 明确业务拒绝标记，回查据此返回 ROLLBACK；执行异常不得写入该值。 */
     public static final String SECKILL_TX_REJECTED = "REJECTED";
+    /** 秒杀用户频控键前缀，完整键为 seckill:rate:{voucherId}:{userId}，类型为 ZSET：请求标识 -> 请求时刻(ms)。 */
+    public static final String SECKILL_RATE_KEY = "seckill:rate:";
     public static final String BLOG_LIKED_KEY = "blog:liked:";
     public static final String FEED_KEY = "feed:";
     public static final String SHOP_GEO_KEY = "shop:geo:";
