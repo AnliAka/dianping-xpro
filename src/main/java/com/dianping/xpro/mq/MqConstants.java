@@ -23,6 +23,16 @@ public final class MqConstants {
     /** 预占释放消费者组。 */
     public static final String ORDER_STOCK_RELEASE_CONSUMER_GROUP = "order-stock-release-consumer-group";
 
+    /** Canal 将 tb_shop 的 ROW binlog 以 flat JSON 投递到该主题。 */
+    public static final String SHOP_BINLOG_TOPIC = "shop-binlog-topic";
+
+    /** 商铺 binlog 集群消费组：两个实例中只需一个负责有序删除共享 Redis。 */
+    public static final String SHOP_REDIS_INVALIDATION_CONSUMER_GROUP =
+            "shop-redis-invalidation-consumer-group";
+
+    /** Redis 删除成功后发布的本地缓存失效主题，消息只包含 shopId 与源事件标识。 */
+    public static final String SHOP_LOCAL_INVALIDATION_TOPIC = "shop-local-invalidation-topic";
+
     /** Outbox 类型：关单提醒（建单事务写入）。 */
     public static final String OUTBOX_TYPE_CLOSE_REMIND = "CLOSE_REMIND";
 

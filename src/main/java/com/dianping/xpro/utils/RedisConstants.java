@@ -16,6 +16,11 @@ public class RedisConstants {
     public static final Long CACHE_SHOP_TTL = 30L;
     public static final String CACHE_SHOP_KEY = "cache:shop:";
 
+    /** 单实例商铺本地缓存固定容量，作为双层缓存容量实验的统一口径。 */
+    public static final Long LOCAL_SHOP_CACHE_MAXIMUM_SIZE = 10_000L;
+    /** 单实例商铺本地缓存固定写入过期时间，单位分钟。 */
+    public static final Long LOCAL_SHOP_CACHE_TTL = 5L;
+
     public static final String LOCK_SHOP_KEY = "lock:shop:";
     public static final Long LOCK_SHOP_TTL = 10L;
 

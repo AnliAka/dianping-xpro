@@ -1,0 +1,4 @@
+-- Canal 只读 binlog 账号。该脚本仅在 MySQL 数据卷首次初始化时执行。
+CREATE USER IF NOT EXISTS 'canal'@'%' IDENTIFIED BY 'canal';
+GRANT SELECT, SHOW VIEW, REPLICATION SLAVE, REPLICATION CLIENT ON *.* TO 'canal'@'%';
+FLUSH PRIVILEGES;

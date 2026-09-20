@@ -33,6 +33,14 @@ rocketmq:
     send-message-timeout: 3000
 
 app:
+  # 两实例部署时必须唯一；用于日志定位以及构造各实例独立的本地缓存消费组。
+  instance-id: ${APP_INSTANCE_ID:local}
+  shop-cache:
+    # false = 修正后的 Redis→MySQL 公平基线；true = Caffeine→Redis→MySQL 实验组。
+    local-enabled: ${SHOP_LOCAL_CACHE_ENABLED:true}
+    # 两个实例必须使用不同消费组，才能让同一条失效通知分别送达每个实例。
+    # 容器编排会显式设置；本地单实例使用下面的默认组。
+    local-invalidation-consumer-group: ${SHOP_LOCAL_CACHE_CONSUMER_GROUP:dianping-shop-local-${app.instance-id}}
   # 订单支付截止时长（分钟）。超过该时间未支付的订单将被关单并释放库存预占。
   # 演示/测试超时关单时可设为 1。
   order:

@@ -1,9 +1,9 @@
-# 本地开发用的中间件编排：MySQL 8 + Redis 7 + OpenResty 网关，可选再起一个应用容器。
+# 本地开发用编排：MySQL 8 + Redis 7 + RocketMQ + Canal + OpenResty，可选双应用实例。
 #
 # 常用命令（在项目根目录执行）：
 #   docker compose up -d mysql redis      # 只起中间件，应用在 IDE / java -jar 里跑
 #   docker compose up -d --build          # 连应用镜像一起构建并启动
-#   docker compose logs -f app            # 跟踪应用日志
+#   docker compose logs -f app-1 app-2    # 跟踪两个应用实例日志
 #   docker compose down                   # 停止并删除容器（数据卷保留）
 #   docker compose down -v                # 连同数据卷一起删除，慎用
 #
@@ -25,10 +25,15 @@ services:
       # 首次启动（数据卷为空）时自动执行建库脚本。
       # 已有数据卷时不会重跑，需要重跑请先 docker compose down -v。
       - ./src/main/resources/db/dianping-xpro.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+      - ./src/main/resources/db/20260919-canal-user.sql:/docker-entrypoint-initdb.d/02-canal-user.sql:ro
     command:
       - --character-set-server=utf8mb4
       - --collation-server=utf8mb4_unicode_ci
       - --default-time-zone=+08:00
+      - --server-id=1
+      - --log-bin=mysql-bin
+      - --binlog-format=ROW
+      - --binlog-row-image=FULL
     healthcheck:
       test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p$$MYSQL_ROOT_PASSWORD --silent"]
       interval: 10s
@@ -66,7 +71,7 @@ services:
       start_period: 10s
 
   # RocketMQ 事务消息。namesrv 供客户端寻址，broker 承载半消息与事务回查。
-  # 应用不在容器里跑时，broker 通过 brokerIP1=127.0.0.1 + 端口映射对宿主机可见。
+  # broker 上报 host.docker.internal，经端口映射同时供宿主机应用与容器内 Canal 访问。
   rocketmq-namesrv:
     image: apache/rocketmq:5.1.4
     container_name: dianping-rocketmq-namesrv
@@ -105,6 +110,8 @@ services:
       # 镜像基于 JDK 8，runbroker.sh 已带 G1 相关参数（不支持固定 -Xmn），
       # 追加 -Xmn 会让 JVM 启动失败，表现为容器以退出码 255 反复重启。这里只限制堆上下限。
       JAVA_OPT_EXT: "-Xms512m -Xmx512m"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     # 必须挂到镜像里已存在的 conf 目录。挂到不存在的路径时 Docker 建出的是目录而不是文件，
     # -c 会读到 FileNotFoundException 并以退出码 255 直接退出。
     command: sh mqbroker -c /home/rocketmq/rocketmq-5.1.4/conf/my-broker.conf
@@ -117,10 +124,41 @@ services:
       # 而 transaction.log（事务回查的唯一记录）也就在那里。
       - rocketmq-broker-logs:/root/logs
 
+  # 订阅 MySQL ROW binlog，仅筛选 dianping_xpro.tb_shop，并以 flat JSON 投递 RocketMQ。
+  # 应用只读取主键并做缓存失效，不用 binlog 里的 before/after 值回写缓存。
+  canal-server:
+    image: canal/canal-server:v1.1.7
+    container_name: dianping-canal
+    restart: unless-stopped
+    depends_on:
+      mysql:
+        condition: service_healthy
+      rocketmq-namesrv:
+        condition: service_healthy
+      rocketmq-broker:
+        condition: service_started
+    environment:
+      canal.auto.scan: "false"
+      canal.destinations: shop
+      canal.serverMode: rocketMQ
+      canal.instance.master.address: mysql:3306
+      canal.instance.dbUsername: canal
+      canal.instance.dbPassword: canal
+      canal.instance.connectionCharset: UTF-8
+      canal.instance.filter.regex: "${DB_NAME:-dianping_xpro}\\.tb_shop"
+      canal.mq.topic: shop-binlog-topic
+      canal.mq.flatMessage: "true"
+      rocketmq.producer.group: canal-shop-binlog-producer
+      rocketmq.namesrv.addr: rocketmq-namesrv:9876
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - canal-logs:/home/admin/canal-server/logs
+
   # 单节点 OpenResty 秒杀网关（双层限流第一层：共享状态原子令牌桶）。
   # 请求经 8080 进入网关，仅 POST /voucher-order/seckill/{id} 受令牌桶约束，其余路径仅转发。
   # 应用地址在 nginx.conf 的 upstream app_backend 里（默认 host.docker.internal:8081），
-  # 应用也用容器跑时改为 app:8081。到上游走 keepalive 连接池，勿改回每请求新建连接。
+  # 双实例容器模式下该地址经 8081 端口映射进入 app-1；app-2 可由 8082 直接访问验证。
   # 令牌桶速率为 T3 容量实验前的占位值，实验后固定，勿凭感觉调。
   openresty:
     image: openresty/openresty:alpine
@@ -136,14 +174,15 @@ services:
       - ./docker/openresty/nginx.conf:/usr/local/openresty/nginx/conf/nginx.conf:ro
       - ./docker/openresty/lua:/usr/local/openresty/nginx/lua:ro
 
-  # 应用容器。默认不随 up 启动，用 profile 控制：
+  # 两个应用实例。默认不随 up 启动，用 profile 控制：
   #   docker compose --profile app up -d --build
-  app:
+  # 两个实例使用不同的本地失效消费组，因此同一条通知会各消费一次。
+  app-1:
     build:
       context: .
       dockerfile: Dockerfile
     image: dianping-xpro:latest
-    container_name: dianping-app
+    container_name: dianping-app-1
     profiles: ["app"]
     restart: unless-stopped
     depends_on:
@@ -153,6 +192,8 @@ services:
         condition: service_healthy
       rocketmq-namesrv:
         condition: service_healthy
+      canal-server:
+        condition: service_started
     environment:
       # 容器内用服务名寻址，覆盖 application.yml 里的本机地址。
       ROCKETMQ_NAME_SERVER: rocketmq-namesrv:9876
@@ -163,11 +204,52 @@ services:
       SPRING_DATA_REDIS_HOST: redis
       SPRING_DATA_REDIS_PORT: 6379
       SPRING_DATA_REDIS_PASSWORD: ${REDIS_PASSWORD:-1}
+      APP_INSTANCE_ID: app-1
+      SHOP_LOCAL_CACHE_ENABLED: ${SHOP_LOCAL_CACHE_ENABLED:-true}
+      SHOP_LOCAL_CACHE_CONSUMER_GROUP: dianping-shop-local-app-1
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     ports:
-      - "${APP_PORT:-8081}:8081"
+      - "${APP_1_PORT:-8081}:8081"
     volumes:
       # 本机私有配置挂进来，覆盖镜像内的默认值。
       # 文件不随构建进镜像，密码不落盘到镜像层。
+      - ./config:/app/config:ro
+
+  app-2:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: dianping-xpro:latest
+    container_name: dianping-app-2
+    profiles: ["app"]
+    restart: unless-stopped
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rocketmq-namesrv:
+        condition: service_healthy
+      canal-server:
+        condition: service_started
+    environment:
+      ROCKETMQ_NAME_SERVER: rocketmq-namesrv:9876
+      SPRING_DATASOURCE_URL: >-
+        jdbc:mysql://mysql:3306/${DB_NAME:-dianping_xpro}?useSSL=false&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true
+      SPRING_DATASOURCE_USERNAME: root
+      SPRING_DATASOURCE_PASSWORD: ${MYSQL_ROOT_PASSWORD:-1234}
+      SPRING_DATA_REDIS_HOST: redis
+      SPRING_DATA_REDIS_PORT: 6379
+      SPRING_DATA_REDIS_PASSWORD: ${REDIS_PASSWORD:-1}
+      APP_INSTANCE_ID: app-2
+      SHOP_LOCAL_CACHE_ENABLED: ${SHOP_LOCAL_CACHE_ENABLED:-true}
+      SHOP_LOCAL_CACHE_CONSUMER_GROUP: dianping-shop-local-app-2
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "${APP_2_PORT:-8082}:8081"
+    volumes:
       - ./config:/app/config:ro
 
 volumes:
@@ -176,3 +258,4 @@ volumes:
   rocketmq-namesrv-logs:
   rocketmq-broker-store:
   rocketmq-broker-logs:
+  canal-logs:
